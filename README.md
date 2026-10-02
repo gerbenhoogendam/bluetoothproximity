@@ -11,6 +11,8 @@ Een kleine native macOS-app (SwiftUI + CoreBluetooth) die Bluetooth Low Energy-a
 - **Kalman-filter op RSSI** waarvan de reactiesnelheid instelbaar is. Het filter houdt rekening met de tijd tussen pakketten.
 - **Afstandsschatting met het log-distance-model** `d = 10^((RSSI@1m − RSSI) / 10n)`, met een marge van ±1σ.
 - **Kalibratie op 1 m per apparaat:** 5 s meten met een getrimd gemiddelde. Het resultaat wordt bewaard.
+- **MAC-adres** van apparaten die met deze Mac gekoppeld of via iCloud gelinkt zijn (gekoppeld op naam via IOBluetooth). macOS geeft MAC-adressen bij een BLE-scan zelf niet vrij.
+- **Verbonden apparaten** (muis, toetsenbord, headset) adverteren niet meer. De app leest hun RSSI rechtstreeks van de verbinding; macOS ververst die waarde ongeveer 1× per seconde.
 - **Live grafiek** met ruwe pakketten en de gefilterde lijn, of met de afstand.
 - **Meetstatistiek:** pakketten per seconde, gemiddeld interval, σ, min/max.
 - **CSV-opname** van elk pakket (timestamp, RSSI ruw/gefilterd, afstand).

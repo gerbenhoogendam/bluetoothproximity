@@ -15,6 +15,8 @@ enum SortOrder: String, CaseIterable, Identifiable {
 @Observable @MainActor
 final class Scanner {
     private let engine = ScanEngine()
+    private let addressBook = AddressBook()
+    private var pushedAddresses: [UUID: String] = [:]
     private var timer: Timer?
 
     var devices: [DeviceSnapshot] = []
@@ -23,6 +25,7 @@ final class Scanner {
     var selectedID: UUID?
     var pinned: Set<UUID> = []
     var recordCount = 0
+    var addresses: [UUID: AddressMatch] = [:]
 
     // Filters
     var search = ""
@@ -32,7 +35,7 @@ final class Scanner {
     var sortOrder: SortOrder = .signal
 
     // Instellingen
-    var intervalMs = 250.0 { didSet { restartTimer() } }
+    var intervalMs = 250.0 { didSet { restartTimer(); let v = intervalMs / 1000; engine.queue.async { [engine] in engine.rssiInterval = v } } }
     var allowDuplicates = true { didSet { let v = allowDuplicates; engine.queue.async { [engine] in engine.allowDuplicates = v; engine.applyScanState() } } }
     var filterEnabled = true { didSet { let v = filterEnabled; engine.queue.async { [engine] in engine.filterEnabled = v } } }
     /// 0 = traag/stabiel, 1 = snel/onrustig. Logaritmisch op de Kalman-procesruis.
@@ -103,7 +106,7 @@ final class Scanner {
             if onlyIdentified && d.name == nil && d.manufacturer == nil { return false }
             if d.filteredRSSI < minRSSI && !pinned.contains(d.id) { return false }
             guard !q.isEmpty else { return true }
-            return [d.name, d.manufacturer, d.kind, d.id.uuidString].compactMap { $0?.lowercased() }.contains { $0.contains(q) }
+            return [d.name, d.manufacturer, d.kind, d.id.uuidString, addresses[d.id]?.address].compactMap { $0?.lowercased() }.contains { $0.contains(q) }
                 || d.messages.contains { $0.lowercased().contains(q) }
         }
         return list.sorted { a, b in
@@ -118,6 +121,8 @@ final class Scanner {
     }
 
     var selected: DeviceSnapshot? { devices.first { $0.id == selectedID } }
+
+    func address(_ id: UUID) -> AddressMatch { addresses[id] ?? .hidden }
 
     // MARK: Timer
 
@@ -135,6 +140,16 @@ final class Scanner {
         let (snaps, count) = engine.queue.sync { (engine.snapshots(selected: sel), engine.recordCount) }
         devices = snaps
         recordCount = count
+
+        addressBook.reloadIfNeeded()
+        var matches: [UUID: AddressMatch] = [:]
+        for d in snaps { matches[d.id] = addressBook.match(name: d.name) }
+        addresses = matches
+        let known = matches.compactMapValues(\.address)
+        if known != pushedAddresses {
+            pushedAddresses = known
+            engine.queue.async { [engine] in engine.addresses = known }
+        }
     }
 
     // MARK: CSV

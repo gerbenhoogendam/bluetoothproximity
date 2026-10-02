@@ -54,6 +54,7 @@ struct DeviceSnapshot: Identifiable {
     let serviceData: [String]
     let txPower: Int?
     let connectable: Bool?
+    let viaConnection: Bool
 
     let rawRSSI: Double
     let filteredRSSI: Double
@@ -94,6 +95,7 @@ final class TrackedDevice {
     let firstSeen: TimeInterval
     var lastSeen: TimeInterval
     var totalPackets = 0
+    var lastConnectionRead: TimeInterval?
     var kalman = Kalman1D()
     var samples: [Sample] = []
 
@@ -129,7 +131,7 @@ final class TrackedDevice {
 
 // MARK: - Engine (draait volledig op de eigen BLE-queue)
 
-final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable {
+final class ScanEngine: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
     let queue = DispatchQueue(label: "nl.gerben.bleproximity.scan", qos: .userInteractive)
     private var central: CBCentralManager!
     private var devices: [UUID: TrackedDevice] = [:]
@@ -144,6 +146,16 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
     var statsWindow = 10.0
     var historyWindow = 30.0
     var calibrations: [UUID: Double]
+    var addresses: [UUID: String] = [:]
+    var rssiInterval = 0.25 { didSet { restartRSSITimer() } }
+
+    // Al verbonden apparaten (muis, toetsenbord, headset) adverteren niet meer;
+    // die vragen we op via de systeemverbinding en lezen de RSSI van de link.
+    private static let connectedServices: [CBUUID] = ["1812", "180F", "180A", "1800", "1801"].map { CBUUID(string: $0) }
+    private var linked: [UUID: CBPeripheral] = [:]
+    private var rssiPending: Set<UUID> = []
+    private var rssiTimer: DispatchSourceTimer?
+    private var discoveryTimer: DispatchSourceTimer?
 
     var recording = false
     var recordOnly: UUID?
@@ -163,6 +175,7 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
         calibrations = Dictionary(uniqueKeysWithValues: stored.compactMap { k, v in UUID(uuidString: k).map { ($0, v) } })
         super.init()
         central = CBCentralManager(delegate: self, queue: queue)
+        queue.async { self.startTimers() }
     }
 
     // MARK: Scannen
@@ -178,19 +191,82 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         onStateChange?(central.state)
+        if central.state != .poweredOn { linked.removeAll(); rssiPending.removeAll() }
         applyScanState()
+        attachConnectedPeripherals()
+    }
+
+    // MARK: Verbonden apparaten (RSSI via de verbinding)
+
+    private func startTimers() {
+        let d = DispatchSource.makeTimerSource(queue: queue)
+        d.schedule(deadline: .now() + 1, repeating: 3)
+        d.setEventHandler { [weak self] in self?.attachConnectedPeripherals() }
+        d.resume()
+        discoveryTimer = d
+        restartRSSITimer()
+    }
+
+    private func restartRSSITimer() {
+        rssiTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: max(rssiInterval, 0.05), leeway: .milliseconds(5))
+        t.setEventHandler { [weak self] in self?.pollRSSI() }
+        t.resume()
+        rssiTimer = t
+    }
+
+    private func attachConnectedPeripherals() {
+        guard central.state == .poweredOn, wantScanning else { return }
+        for p in central.retrieveConnectedPeripherals(withServices: Self.connectedServices) where linked[p.identifier] == nil {
+            linked[p.identifier] = p
+            p.delegate = self
+            central.connect(p, options: nil)
+        }
+    }
+
+    private func pollRSSI() {
+        guard wantScanning else { return }
+        for (id, p) in linked where p.state == .connected && !rssiPending.contains(id) {
+            rssiPending.insert(id)
+            p.readRSSI()
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        peripheral.readRSSI()
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        linked[peripheral.identifier] = nil
+        rssiPending.remove(peripheral.identifier)
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        linked[peripheral.identifier] = nil
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        rssiPending.remove(peripheral.identifier)
+        guard error == nil else { return }
+        ingest(id: peripheral.identifier, rssi: RSSI.doubleValue, adv: nil,
+               name: peripheral.name, viaConnection: true)
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        let rssi = RSSI.doubleValue
+        ingest(id: peripheral.identifier, rssi: RSSI.doubleValue, adv: advertisementData,
+               name: peripheral.name, viaConnection: false)
+    }
+
+    private func ingest(id: UUID, rssi: Double, adv: [String: Any]?, name: String?, viaConnection: Bool) {
         guard rssi < 0, rssi > -127 else { return } // 127 = niet beschikbaar
         let now = ProcessInfo.processInfo.systemUptime
-        let id = peripheral.identifier
 
         let dev = devices[id] ?? TrackedDevice(id: id, now: now)
         devices[id] = dev
-        dev.absorb(advertisementData, peripheralName: peripheral.name)
+        dev.absorb(adv ?? [:], peripheralName: name)
+        if viaConnection { dev.lastConnectionRead = now }
 
         let dt = dev.totalPackets == 0 ? 0 : now - dev.lastSeen
         let kalmanValue = dev.kalman.update(rssi, dt: dt, q: processNoise, r: measurementNoise)
@@ -211,7 +287,7 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
             let dist = estimateDistance(rssi: filtered, ref: ref, n: pathLossExponent)
             let name = (dev.name ?? "").replacingOccurrences(of: ",", with: " ")
             let mfg = BLEInfo.companyID(dev.manufacturerData).map { BLEInfo.companyName($0) } ?? ""
-            recordRows.append("\(iso.string(from: Date())),\(String(format: "%.4f", now)),\(id.uuidString),\(name),\(mfg),\(Int(rssi)),\(String(format: "%.2f", filtered)),\(String(format: "%.3f", dist))")
+            recordRows.append("\(iso.string(from: Date())),\(String(format: "%.4f", now)),\(id.uuidString),\(addresses[id] ?? ""),\(name),\(mfg),\(Int(rssi)),\(String(format: "%.2f", filtered)),\(String(format: "%.3f", dist))")
         }
     }
 
@@ -250,7 +326,7 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
     // MARK: Opname
 
     func takeCSV() -> String {
-        let header = "timestamp,uptime_s,uuid,name,manufacturer,rssi_raw_dbm,rssi_filtered_dbm,distance_m"
+        let header = "timestamp,uptime_s,uuid,mac,name,manufacturer,rssi_raw_dbm,rssi_filtered_dbm,distance_m"
         return ([header] + recordRows).joined(separator: "\n") + "\n"
     }
 
@@ -306,6 +382,7 @@ final class ScanEngine: NSObject, CBCentralManagerDelegate, @unchecked Sendable 
                 serviceData: dev.serviceData.map { "\(BLEInfo.serviceName($0.key)): \(BLEInfo.hex($0.value))" }.sorted(),
                 txPower: dev.txPower,
                 connectable: dev.connectable,
+                viaConnection: dev.lastConnectionRead.map { now - $0 < 3 } ?? false,
                 rawRSSI: last.raw,
                 filteredRSSI: last.filtered,
                 distance: estimateDistance(rssi: last.filtered, ref: ref, n: n),

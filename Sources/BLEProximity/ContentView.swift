@@ -10,7 +10,7 @@ struct ContentView: View {
                 FilterBar()
                 List(selection: Binding(get: { scanner.selectedID }, set: { scanner.select($0) })) {
                     ForEach(scanner.visibleDevices) { d in
-                        DeviceRow(device: d, pinned: scanner.pinned.contains(d.id))
+                        DeviceRow(device: d, pinned: scanner.pinned.contains(d.id), address: scanner.address(d.id))
                             .tag(d.id)
                     }
                 }
@@ -33,7 +33,7 @@ struct ContentView: View {
                                        description: Text("\(scanner.devices.count) apparaten in de buurt · \(scanner.bluetoothState)"))
             }
         }
-        .searchable(text: $scanner.search, placement: .sidebar, prompt: "Naam, fabrikant, type of UUID")
+        .searchable(text: $scanner.search, placement: .sidebar, prompt: "Naam, fabrikant, type, MAC of UUID")
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -106,6 +106,7 @@ struct FilterBar: View {
 struct DeviceRow: View {
     let device: DeviceSnapshot
     let pinned: Bool
+    let address: AddressMatch
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -113,10 +114,27 @@ struct DeviceRow: View {
                 HStack(spacing: 4) {
                     if pinned { Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange) }
                     Text(device.displayName).font(.body.weight(.medium)).lineLimit(1)
+                    if device.viaConnection {
+                        Image(systemName: "link").font(.caption2).foregroundStyle(.green)
+                            .help("Verbonden met de Mac — RSSI rechtstreeks van de verbinding")
+                    }
                     if device.isCalibrated { Image(systemName: "scope").font(.caption2).foregroundStyle(.blue).help("Gekalibreerd") }
                 }
                 Text([device.manufacturer, device.name == nil ? nil : device.kind].compactMap { $0 }.joined(separator: " · ").ifEmpty("Geen fabrikantdata"))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                switch address {
+                case .known(let k):
+                    Label(k.address, systemImage: "number")
+                        .font(.caption.monospaced().weight(.medium))
+                        .foregroundStyle(.blue)
+                        .labelStyle(.titleAndIcon)
+                        .help("Bluetooth-adres uit de koppelingen van deze Mac")
+                case .ambiguous(let list):
+                    Label("\(list.count) mogelijke adressen", systemImage: "number")
+                        .font(.caption).foregroundStyle(.orange)
+                case .hidden:
+                    EmptyView()
+                }
                 SignalBar(rssi: device.filteredRSSI)
             }
             Spacer(minLength: 4)

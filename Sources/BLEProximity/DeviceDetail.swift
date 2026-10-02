@@ -10,6 +10,7 @@ struct DeviceDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                AddressCard(match: scanner.address(device.id), uuid: device.id)
                 tiles
                 chart
                 HStack(alignment: .top, spacing: 18) {
@@ -33,6 +34,11 @@ struct DeviceDetail: View {
                 Text(device.id.uuidString).font(.caption.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
             }
             Spacer()
+            if device.viaConnection {
+                Label("Verbonden · RSSI via verbinding", systemImage: "link")
+                    .foregroundStyle(.green)
+                    .help("Dit apparaat adverteert niet (het is verbonden). De app leest de RSSI van de verbinding; macOS ververst die waarde ongeveer 1× per seconde.")
+            }
             if device.isStale {
                 Label("\(Int(device.secondsSinceLast)) s geen signaal", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
@@ -203,5 +209,73 @@ struct Tile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct AddressCard: View {
+    let match: AddressMatch
+    let uuid: UUID
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Bluetooth-adres (MAC)").font(.caption).foregroundStyle(.secondary)
+                content
+            }
+            Spacer()
+            if case .known(let k) = match {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(k.address, forType: .string)
+                } label: { Label("Kopieer", systemImage: "doc.on.doc") }
+            }
+        }
+        .padding(14)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(tint.opacity(0.25)))
+    }
+
+    @ViewBuilder private var content: some View {
+        switch match {
+        case .known(let k):
+            Text(k.address)
+                .font(.system(size: 24, weight: .semibold, design: .monospaced))
+                .textSelection(.enabled)
+            Text("Gekoppeld met deze Mac als „\(k.name)\"\(k.connected ? " · nu verbonden" : "")")
+                .font(.caption).foregroundStyle(.secondary)
+        case .ambiguous(let list):
+            ForEach(list, id: \.address) { k in
+                Text("\(k.address)  \(k.connected ? "· verbonden" : "")")
+                    .font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            }
+            Text("Meerdere gekoppelde apparaten met deze naam — de scan kan niet bepalen welke dit is.")
+                .font(.caption).foregroundStyle(.secondary)
+        case .hidden:
+            Text("Niet vrijgegeven door macOS")
+                .font(.title3.weight(.medium))
+            Text("macOS toont bij een BLE-scan alleen een per-Mac UUID (\(uuid.uuidString.prefix(8))…). Het echte adres is alleen bekend voor apparaten die met deze Mac gekoppeld of via iCloud gelinkt zijn én hun naam uitzenden.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var icon: String {
+        switch match {
+        case .known: "checkmark.seal.fill"
+        case .ambiguous: "questionmark.diamond"
+        case .hidden: "eye.slash"
+        }
+    }
+
+    private var tint: Color {
+        switch match {
+        case .known: .blue
+        case .ambiguous: .orange
+        case .hidden: .gray
+        }
     }
 }
